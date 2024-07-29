@@ -1,0 +1,19 @@
+apiVersion: v1
+data:
+  iceberg.properties: |-
+    connector.name=iceberg
+    iceberg.file-format=PARQUET
+    hive.metastore.uri=thrift://metastore:9083
+    hive.s3.aws-access-key=chapolin
+    hive.s3.aws-secret-key=mudar@123
+    hive.s3.endpoint=http://minio:9000
+    hive.s3.path-style-access=true
+    iceberg.register-table-procedure.enabled=true
+    iceberg.unique-table-location=false
+kind: ConfigMap
+metadata:
+  annotations:
+    use-subpath: "true"
+  labels:
+    io.kompose.service: trino
+  name: trino-cm2

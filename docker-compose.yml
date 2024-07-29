@@ -1,0 +1,142 @@
+services:
+  minio:
+    image: wlcamargo/minio
+    container_name: minio
+    networks:
+      - playground
+    ports:
+      - 9000:9000
+      - 9001:9001
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio:/data
+    environment:
+      - MINIO_ROOT_USER=chapolin
+      - MINIO_ROOT_PASSWORD=mudar@123
+
+  metastore-db:
+    image: wlcamargo/mariadb
+    container_name: metastore-db
+    networks:
+      - playground
+    volumes:
+      - metastore-db:/var/lib/mysql
+    environment:
+      - MYSQL_ROOT_PASSWORD=mypass
+
+  create-metastore-schema:
+    image: wlcamargo/hive-metastore 
+    container_name: create-metastore-schema
+    depends_on:
+      - metastore-db
+    networks:
+      - playground
+    command: /opt/hive-metastore/bin/schematool --verbose -initSchema -dbType mysql -userName root -passWord mypass -url jdbc:mysql://metastore-db:3306/metastore_db?createDatabaseIfNotExist=true
+    restart: on-failure
+
+  metastore:
+    image: wlcamargo/hive-metastore
+    container_name: metastore
+    networks:
+      - playground
+    volumes:
+      - ./src/metastore/metastore-site.xml:/opt/hive-metastore/conf/metastore-site.xml
+      - ./src/metastore/core-site.xml:/opt/hadoop/etc/hadoop/core-site.xml
+    environment:
+      - AWS_ACCESS_KEY_ID=chapolin
+      - AWS_SECRET_ACCESS_KEY=mudar@123
+    command: /opt/hive-metastore/bin/start-metastore -p 9083
+    depends_on:
+      - create-metastore-schema
+      - metastore-db
+    restart: always
+
+  spark-master:
+    image: wlcamargo/spark-master
+    hostname: spark-master
+    container_name: spark-master
+    command: 
+      - /bin/sh
+      - -c
+      - |
+        /usr/local/spark/sbin/start-master.sh
+        start-notebook.sh --NotebookApp.token=''
+    ports:
+      - 8889:8888
+      - 4040:4040
+      - 7077:7077
+    volumes:
+      - ./src/jobs_spark/spark/util:/util
+      - ./src/jobs_spark/spark/env:/env 
+      - ./src/jobs_spark/notebooks:/home/user/work
+    networks:
+      - playground
+
+  spark-worker1:
+    image: wlcamargo/spark-master
+    hostname:  spark-worker1
+    container_name: spark-worker1
+    command: 
+      - /bin/sh
+      - -c
+      - |
+        /usr/local/spark/sbin/start-worker.sh spark-master:7077
+        start-notebook.sh --NotebookApp.token='' 
+    ports:
+      - 5043:4040
+      - 5044:4041
+    volumes:
+      - ./src/jobs_spark/spark/util:/util
+      - ./src/jobs_spark/spark/env:/env 
+    depends_on:
+      - spark-master
+    networks:
+      - playground
+
+  spark-worker2:
+    image: wlcamargo/spark-master
+    hostname: spark-worker2
+    container_name: spark-worker2
+    command: 
+      - /bin/sh
+      - -c
+      - |
+        /usr/local/spark/sbin/start-worker.sh spark-master:7077
+        start-notebook.sh --NotebookApp.token='' 
+    ports:
+      - 5045:4041
+      - 5046:4042
+    volumes:
+      - ./src/jobs_spark/spark/util:/util
+      - ./src/jobs_spark/spark/env:/env 
+    depends_on:
+      - spark-master
+    networks:
+      - playground
+
+  trino:
+    image: wlcamargo/trino
+    container_name: trino
+    hostname: trino
+    ports:
+      - 8080:8080
+    volumes:
+      - ./src/trino/hive.properties:/etc/trino/catalog/hive.properties
+      - ./src/trino/delta.properties:/etc/trino/catalog/delta.properties
+      - ./src/trino/iceberg.properties:/etc/trino/catalog/iceberg.properties
+      - ./src/trino/postgres.properties:/etc/trino/catalog/postgres.properties
+      - ./src/trino/sqlserver.properties:/etc/trino/catalog/sqlserver.properties
+    networks:
+      - playground
+    depends_on:
+      - metastore
+
+volumes:
+  minio:
+  metastore-db:
+  data:
+    name: ${DATA_DOCKER_MOUNT}
+
+networks:
+  playground:
+    driver: bridge

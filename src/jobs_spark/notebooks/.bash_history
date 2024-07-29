@@ -1,0 +1,3 @@
+spark-submit 102_read_delta_bronze_employee.py 
+spark-submit 112_refinement_silver_to_gold_delta.py 
+spark-submit 112_refinement_silver_to_gold_delta.py 

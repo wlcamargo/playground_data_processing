@@ -1,0 +1,10 @@
+apiVersion: v1
+data:
+  metastore-site.xml: "<configuration>\n    <property>\n        <name>metastore.task.threads.always</name>\n        <value>org.apache.hadoop.hive.metastore.events.EventCleanerTask</value>\n    </property>\n    \n    <property>\n        <name>metastore.expression.proxy</name>\n        <value>org.apache.hadoop.hive.metastore.DefaultPartitionExpressionProxy</value>\n    </property>\n    \n    <property>\n        <name>javax.jdo.option.ConnectionDriverName</name>\n        <value>com.mysql.jdbc.Driver</value>\n    </property>\n    \n    <property>\n        <name>javax.jdo.option.ConnectionURL</name>\n        <value>jdbc:mysql://metastore-db:3306/metastore_db</value>\n    </property>\n    \n    <property>\n        <name>javax.jdo.option.ConnectionUserName</name>\n        <value>root</value>\n    </property>\n    \n    <property>\n        <name>javax.jdo.option.ConnectionPassword</name>\n        <value>mypass</value>\n    </property>\n    \n    <property>\n        <name>metastore.thrift.port</name>\n        <value>9083</value>\n    </property>\n</configuration>"
+kind: ConfigMap
+metadata:
+  annotations:
+    use-subpath: "true"
+  labels:
+    io.kompose.service: metastore
+  name: metastore-cm0

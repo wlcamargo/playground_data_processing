@@ -1,0 +1,1018 @@
+apiVersion: v1
+data:
+  .bash_history: "spark-submit 102_read_delta_bronze_employee.py \nspark-submit 112_refinement_silver_to_gold_delta.py \nspark-submit 112_refinement_silver_to_gold_delta.py \n"
+  106_elt_postgres_to_landing_parquet_adventure.py: "import pyspark\nfrom pyspark.sql import SparkSession\nimport logging\nfrom configs import configs\nfrom functions import functions as F\n\nspark = SparkSession.builder \\\n        .appName(\"ELT Full Postgres to Landing AdventureWorks\") \\\n        .config(\"spark.hadoop.fs.s3a.endpoint\", \"http://minio:9000\") \\\n        .config(\"spark.hadoop.fs.s3a.access.key\", \"chapolin\") \\\n        .config(\"spark.hadoop.fs.s3a.secret.key\", \"mudar@123\") \\\n        .config(\"spark.hadoop.fs.s3a.path.style.access\", True) \\\n        .config(\"spark.hadoop.fs.s3a.impl\", \"org.apache.hadoop.fs.s3a.S3AFileSystem\") \\\n        .config(\"spark.hadoop.fs.s3a.aws.credentials.provider\", \"org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider\") \\\n        .config(\"hive.metastore.uris\", \"thrift://metastore:9083\") \\\n        .config(\"spark.sql.extensions\", \"io.delta.sql.DeltaSparkSessionExtension\") \\\n        .config(\"spark.sql.catalog.spark_catalog\", \"org.apache.spark.sql.delta.catalog.DeltaCatalog\") \\\n        .getOrCreate()\n\n\nlogging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')\n\n\nlogging.info(\"Starting ingestions from AdventureWorks to Landing Zone...\")\n\nfor table_input_name in configs.tables_postgres_adventureworks.values():\n    try:\n        table_input_path = F.convert_table_name(table_input_name)\n        \n\n        df_input_data = spark.read \\\n            .format(\"jdbc\") \\\n            .option(\"url\", \"jdbc:postgresql://172.21.121.140:5435/Adventureworks\") \\\n            .option(\"user\", \"postgres\") \\\n            .option(\"dbtable\", table_input_name) \\\n            .option(\"password\", \"postgres\") \\\n            .option(\"driver\", \"org.postgresql.Driver\") \\\n            .load()\n\n        output_table_name = configs.lake_path['landing_zone_adventure_works']\n        output_table_path = f\"{output_table_name}{table_input_path}\"\n        \n        logging.info(f\"Processing table: {table_input_path}\")\n        \n\n        df_with_update_date = F.add_metadata(df_input_data)\n        \n\n        df_with_month_key = F.add_month_key_column(df_with_update_date, 'modifieddate')\n            \n        df_with_month_key.write.format(\"parquet\").mode(\"overwrite\").partitionBy('month_key').save(output_table_path)\n        \n        logging.info(f\"Table {table_input_path} successfully processed and saved to HDFS: {output_table_path}\")\n\n    except Exception as e:\n\n        logging.error(f\"Error processing table {table_input_name}: {str(e)}\")\n\n\nlogging.info(\"Ingestions to Landing Zone completed!\")\n"
+  107_elt_parquet_to_bronze_delta_adventure.py: "import pyspark\nfrom pyspark.sql import SparkSession\nimport logging\nfrom datetime import datetime  \nfrom pyspark.sql.functions import lit \nfrom configs import configs\nfrom functions import functions as F\n\nspark = SparkSession.builder \\\n        .appName(\"ELT Full Landing to Bronze AdventureWorks\") \\\n        .config(\"spark.hadoop.fs.s3a.endpoint\", \"http://minio:9000\") \\\n        .config(\"spark.hadoop.fs.s3a.access.key\", \"chapolin\") \\\n        .config(\"spark.hadoop.fs.s3a.secret.key\", \"mudar@123\") \\\n        .config(\"spark.hadoop.fs.s3a.path.style.access\", True) \\\n        .config(\"spark.hadoop.fs.s3a.impl\", \"org.apache.hadoop.fs.s3a.S3AFileSystem\") \\\n        .config(\"spark.hadoop.fs.s3a.aws.credentials.provider\", \"org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider\") \\\n        .config(\"hive.metastore.uris\", \"thrift://metastore:9083\") \\\n        .config(\"spark.sql.extensions\", \"io.delta.sql.DeltaSparkSessionExtension\") \\\n        .config(\"spark.sql.catalog.spark_catalog\", \"org.apache.spark.sql.delta.catalog.DeltaCatalog\") \\\n        .getOrCreate()\n\nlogging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')\n\n\nlogging.info(\"Starting ingestions from Landing Zone to Bronze...\")\n\ntable_input_name = configs.lake_path['landing_zone_adventure_works']  \noutput_prefix_layer_name = configs.prefix_layer_name['1']\nstorage_output = configs.lake_path['bronze']  \n\nlogging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')\n\n\nlogging.info(\"Starting ingestions to bronze layer...\")\n\nfor key, value in configs.tables_postgres_adventureworks.items():\n    table = value\n    table_name = F.convert_table_name(table)\n    \n    try:\n        df_input_data = spark.read.format(\"parquet\").load(f'{table_input_name}{table_name}') \n        df_with_update_date = df_input_data.withColumn(\"last_update\", lit(datetime.now()))\n        df_with_update_date.write.format(\"delta\").mode(\"overwrite\").partitionBy('month_key').save(f'{storage_output}{output_prefix_layer_name}{table_name}')        \n        logging.info(f\"Table {table_name} successfully processed and saved to HDFS: {storage_output}{output_prefix_layer_name}{table_name}\")\n        \n    except Exception as e:\n        logging.error(f\"Error processing table {table}: {str(e)}\")\n\nlogging.info(\"Ingestions to bronze layer completed!\")\n"
+  108_process_bronze_to_silver_delta_adventure.py: "import pyspark\nfrom pyspark.sql import SparkSession\nimport logging\nfrom datetime import datetime  \n\nfrom pyspark.sql.functions import lit  \n\nfrom configs import configs\nfrom functions import functions as F\n\n\ndef process_table(spark, query_input, output_path):\n    try:\n        df_input_data = spark.sql(query_input)\n        df_with_update_date = df_input_data.withColumn(\"last_update\", lit(datetime.now()))\n        df_with_update_date.write.format(\"delta\").mode(\"overwrite\").partitionBy('month_key').save(output_path)\n        logging.info(f\"Query '{query_input}' successfully processed and saved to {output_path}\")\n    except Exception as e:\n        logging.error(f\"Error processing query '{query_input}': {str(e)}\")\n\nif __name__ == \"__main__\":\n    spark = SparkSession.builder \\\n        .appName(\"Process Full Bronze to Silver\") \\\n        .config(\"spark.hadoop.fs.s3a.endpoint\", \"http://minio:9000\") \\\n        .config(\"spark.hadoop.fs.s3a.access.key\", \"chapolin\") \\\n        .config(\"spark.hadoop.fs.s3a.secret.key\", \"mudar@123\") \\\n        .config(\"spark.hadoop.fs.s3a.path.style.access\", True) \\\n        .config(\"spark.hadoop.fs.s3a.impl\", \"org.apache.hadoop.fs.s3a.S3AFileSystem\") \\\n        .config(\"spark.hadoop.fs.s3a.aws.credentials.provider\", \"org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider\") \\\n        .config(\"hive.metastore.uris\", \"thrift://metastore:9083\") \\\n        .config(\"spark.sql.extensions\", \"io.delta.sql.DeltaSparkSessionExtension\") \\\n        .config(\"spark.sql.catalog.spark_catalog\", \"org.apache.spark.sql.delta.catalog.DeltaCatalog\") \\\n        .getOrCreate()\n\n    input_prefix_layer_name = configs.prefix_layer_name['1']  # silver layer\n    input_path = configs.lake_path['bronze']\n\n    output_prefix_layer_name = configs.prefix_layer_name['2']  # gold layer\n    output_path = configs.lake_path['silver']\n\n    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')\n\n    logging.info(\"Starting Process to Silver...\")\n\n    try:\n        for table_name, query_input in configs.tables_queries_silver.items():  \n            table_name = F.convert_table_name(table_name)\n\n            query_input = F.get_query(table_name, input_path, input_prefix_layer_name, configs.tables_queries_silver)\n    \n            storage_output = f\"{output_path}{output_prefix_layer_name}{table_name}\"\n            \n            process_table(spark, query_input, storage_output)\n        \n        logging.info(\"Process to Silver completed!\")\n    except Exception as e:\n        logging.error(f\"Error processing table: {str(e)}\")\n"
+  109_refinement_silver_to_gold_delta_adventure.py: "import pyspark\nfrom pyspark.sql import SparkSession\nimport logging\nfrom datetime import datetime  \n\nfrom pyspark.sql.functions import lit  \n\nfrom configs import configs\nfrom functions import functions as F\n\n\ndef process_table(spark, query_input, output_table_path):\n    try:\n        df_input_data = spark.sql(query_input)\n        df_with_update_date = df_input_data.withColumn(\"last_update\", lit(datetime.now()))\n        df_with_update_date.write.format(\"delta\").mode(\"overwrite\").partitionBy('month_key').save(output_table_path)\n        logging.info(f\"Query '{query_input}' successfully processed and saved to {output_table_path}\")\n    except Exception as e:\n        logging.error(f\"Error processing query '{query_input}': {str(e)}\")\n\nif __name__ == \"__main__\":\n    spark = SparkSession.builder \\\n        .appName(\"Refinement Full Silver to Gold\") \\\n        .config(\"spark.hadoop.fs.s3a.endpoint\", \"http://minio:9000\") \\\n        .config(\"spark.hadoop.fs.s3a.access.key\", \"chapolin\") \\\n        .config(\"spark.hadoop.fs.s3a.secret.key\", \"mudar@123\") \\\n        .config(\"spark.hadoop.fs.s3a.path.style.access\", True) \\\n        .config(\"spark.hadoop.fs.s3a.impl\", \"org.apache.hadoop.fs.s3a.S3AFileSystem\") \\\n        .config(\"spark.hadoop.fs.s3a.aws.credentials.provider\", \"org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider\") \\\n        .config(\"hive.metastore.uris\", \"thrift://metastore:9083\") \\\n        .config(\"spark.sql.extensions\", \"io.delta.sql.DeltaSparkSessionExtension\") \\\n        .config(\"spark.sql.catalog.spark_catalog\", \"org.apache.spark.sql.delta.catalog.DeltaCatalog\") \\\n        .getOrCreate()\n\n \n    input_prefix_layer_name = configs.prefix_layer_name['2']  # silver layer\n    input_path = configs.lake_path['silver']\n    output_prefix_layer_name = configs.prefix_layer_name['3']  # gold layer\n    output_path = configs.lake_path['gold']\n\n  \n    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')\n\n\n    logging.info(\"Starting refinement to Gold...\")\n\n\n    try:\n        for table_name, query_input in configs.tables_gold.items(): \n            table_name = F.convert_table_name(table_name)\n\n            query_input = F.get_query(table_name, input_path, input_prefix_layer_name, configs.tables_gold)\n\n            storage_output= f\"{output_path}{output_prefix_layer_name}{table_name}\"\n\n            process_table(spark, query_input, storage_output)  \n        \n        logging.info(\"Refinement to Gold completed!\")\n    except Exception as e:\n        logging.error(f\"Error processing table: {str(e)}\")\n"
+  112_update_landing.py: "import pyspark\nfrom pyspark.sql import SparkSession\nimport logging\nfrom configs import configs\nfrom functions import functions as F\nimport time\n\ndef get_credential_source():\n    \"\"\"Get the credentials for the data source.\"\"\"\n    credential_source = configs.credential_jdbc_postgres_adventureworks\n    return {\n        'url': credential_source['url'],\n        'user': credential_source['user'],\n        'password': credential_source['password'],\n        'driver': credential_source['driver']\n    }\n\ndef get_data(table_input_name, spark, credential_source):\n    \"\"\"Get data from PostgreSQL table and return a DataFrame.\"\"\"\n    return spark.read \\\n        .format(\"jdbc\") \\\n        .option(\"url\", credential_source['url']) \\\n        .option(\"user\", credential_source['user']) \\\n        .option(\"dbtable\", table_input_name) \\\n        .option(\"password\", credential_source['password']) \\\n        .option(\"driver\", credential_source['driver']) \\\n        .load()\n\ndef compare_data(df_input_data, storage_output, spark):\n    \"\"\"Compare data from source with target and return DataFrame with new records.\"\"\"\n\n    df_output = spark.read.format(\"parquet\").load(storage_output)\n    \n    max_date_storage_output = df_output.selectExpr(\"max(modifieddate)\").collect()[0][0]\n    \n    new_records_df = df_input_data.filter(df_input_data[\"modifieddate\"] > max_date_storage_output)\n    \n    return new_records_df\n\ndef process_table(table_name, df_input_data, storage_output, spark):\n    \"\"\"Process table by adding metadata and inserting new records.\"\"\"\n    logging.info(f\"Processing table: {table_name}. Source: PostgreSQL, Target: Delta Lake.\")\n    start_time = time.time()\n    \n    df_with_metadata = F.add_metadata(df_input_data)\n    \n    df_with_month_key = F.add_month_key_column(df_with_metadata, 'modifieddate')\n    \n    new_records_df = compare_data(df_with_month_key, storage_output, spark)\n    \n    if new_records_df.rdd.isEmpty():\n        logging.info(f\"No new data found for table {table_name}. Skipping ingestion.\")\n    else:\n        num_rows_written = write_data(new_records_df, storage_output, spark)\n        end_time = time.time()\n        duration = end_time - start_time\n        logging.info(f\"Table {table_name} processed in {duration:.2f} seconds. {num_rows_written} new rows written.\")\n    \ndef write_data(df_with_month_key, storage_output, spark):\n    \"\"\"Save new partitioned data to target and return the number of rows written.\"\"\"\n    start_time = time.time()\n    df_with_month_key.write.format(\"parquet\").mode(\"append\").partitionBy('month_key').save(storage_output)\n    num_rows_written = df_with_month_key.count()\n    end_time = time.time()\n    duration = end_time - start_time\n    logging.info(f\"New data processed and appended to target for table {storage_output} in {duration:.2f} seconds. {num_rows_written} rows written.\")\n    return num_rows_written\n\ndef main(app_name, source_name, target_name, spark_configs):\n\n    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')\n\n    logging.info(f\"Starting ingestions from {source_name} to {target_name}...\")\n\n    spark = SparkSession.builder \\\n        .appName(app_name) \\\n        .config(\"spark.hadoop.fs.s3a.endpoint\", spark_configs['s3_endpoint']) \\\n        .config(\"spark.hadoop.fs.s3a.access.key\", spark_configs['s3_access_key']) \\\n        .config(\"spark.hadoop.fs.s3a.secret.key\", spark_configs['s3_secret_key']) \\\n        .config(\"spark.hadoop.fs.s3a.path.style.access\", spark_configs['s3_path_style_access']) \\\n        .config(\"spark.hadoop.fs.s3a.impl\", spark_configs['s3_impl']) \\\n        .config(\"spark.hadoop.fs.s3a.aws.credentials.provider\", spark_configs['s3_credentials_provider']) \\\n        .config(\"hive.metastore.uris\", spark_configs['hive_metastore_uris']) \\\n        .config(\"spark.sql.extensions\", spark_configs['delta_sql_extension']) \\\n        .config(\"spark.sql.catalog.spark_catalog\", spark_configs['delta_catalog']) \\\n        .getOrCreate()\n\n    credential_source = get_credential_source() \n    \n    for table_name in configs.tables_postgres_adventureworks.values():\n        try:\n            table_name_hdfs = F.convert_table_name(table_name)\n            df_input_data = get_data(table_name, spark, credential_source)  \n            lake_path = configs.lake_path['landing_zone_adventure_works']\n            storage_output = f\"{lake_path}{table_name_hdfs}\"\n            \n            process_table(table_name, df_input_data, storage_output, spark)\n        except Exception as e:\n\n            logging.error(f\"Error processing table {table_name}: {str(e)}\")\n\n    logging.info(f\"Ingestions from {source_name} to {target_name} completed!\")\n\n\nif __name__ == \"__main__\":\n    app_name = 'ELT Incremental Postgres to Landing AdventureWorks'\n    source_name = 'Postgres - AdventureWorks'\n    target_name = 'S3 Data Lake'\n    spark_configs = configs.spark_configs_s3\n    \n    main(app_name, source_name, target_name, spark_configs)\n"
+  113_update_bronze.py: "import pyspark\nfrom pyspark.sql import SparkSession\nimport logging\nfrom datetime import datetime  \n\nfrom pyspark.sql.functions import lit  \n\nfrom configs import configs\nfrom functions import functions as F\n\ndef configure_spark():\n    \"\"\"Configure SparkSession.\"\"\"\n    spark = SparkSession.builder \\\n            .appName(\"ELT Incremental Landing to Bronze AdventureWorks\") \\\n            .config(\"spark.hadoop.fs.s3a.endpoint\", \"http://minio:9000\") \\\n            .config(\"spark.hadoop.fs.s3a.access.key\", \"chapolin\") \\\n            .config(\"spark.hadoop.fs.s3a.secret.key\", \"mudar@123\") \\\n            .config(\"spark.hadoop.fs.s3a.path.style.access\", True) \\\n            .config(\"spark.hadoop.fs.s3a.impl\", \"org.apache.hadoop.fs.s3a.S3AFileSystem\") \\\n            .config(\"spark.hadoop.fs.s3a.aws.credentials.provider\", \"org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider\") \\\n            .config(\"hive.metastore.uris\", \"thrift://metastore:9083\") \\\n            .config(\"spark.sql.extensions\", \"io.delta.sql.DeltaSparkSessionExtension\") \\\n            .config(\"spark.sql.catalog.spark_catalog\", \"org.apache.spark.sql.delta.catalog.DeltaCatalog\") \\\n            .getOrCreate()\n    return spark\n\ndef ingest_data():\n    \"\"\"Ingest data from AdventureWorks to HDFS.\"\"\"\n\n    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')\n\n    logging.info(\"Ingestion Delta...\")\n\n    table_input_name = configs.lake_path['landing_zone_adventure_works']\n    output_prefix_layer_name = configs.prefix_layer_name['1']  # bronze layer\n    storage_output = configs.lake_path['bronze']\n\n    for key, value in configs.tables_postgres_adventureworks.items():\n        table = value\n        table_name = F.convert_table_name(table)\n\n        try:\n            df_input_data = spark.read.format(\"parquet\").load(f'{table_input_name}{table_name}')\n\n            df_delta = spark.read.format(\"delta\").load(f'{storage_output}{output_prefix_layer_name}{table_name}')\n\n            max_modified_date_delta = df_delta.selectExpr(\"max(modifieddate)\").collect()[0][0]\n\n            df_new_data = df_input_data.filter(df_input_data[\"modifieddate\"] > max_modified_date_delta)\n            \n            df_with_update_date = df_new_data.withColumn(\"last_update\", lit(datetime.now()))\n\n            df_with_update_date.write.format(\"delta\").mode(\"append\").partitionBy('month_key').save(f'{storage_output}{output_prefix_layer_name}{table_name}')\n\n            num_rows_written = df_with_update_date.count()\n            logging.info(f\"Table {table_name} successfully processed and saved to Delta Lake: {storage_output}{output_prefix_layer_name}{table_name}. {num_rows_written} rows written.\")\n\n        except Exception as e:\n            logging.error(f\"Error processing table {table}: {str(e)}\")\n\n    logging.info(\"Ingestion Delta completed!\")\n\nif __name__ == \"__main__\":\n    spark = configure_spark()\n    ingest_data()\n"
+  114_update_silver.py: "import pyspark\nfrom pyspark.sql import SparkSession\nimport logging\nfrom datetime import datetime \n\nfrom pyspark.sql.functions import lit\n\nfrom configs import configs\nfrom functions import functions as F\n\ndef configure_spark():\n    \"\"\"Configure SparkSession.\"\"\"\n    spark = SparkSession.builder \\\n            .appName(\"Process Incremental Bronze to Silver AdventureWorks\") \\\n            .config(\"spark.hadoop.fs.s3a.endpoint\", \"http://minio:9000\") \\\n            .config(\"spark.hadoop.fs.s3a.access.key\", \"chapolin\") \\\n            .config(\"spark.hadoop.fs.s3a.secret.key\", \"mudar@123\") \\\n            .config(\"spark.hadoop.fs.s3a.path.style.access\", True) \\\n            .config(\"spark.hadoop.fs.s3a.impl\", \"org.apache.hadoop.fs.s3a.S3AFileSystem\") \\\n            .config(\"spark.hadoop.fs.s3a.aws.credentials.provider\", \"org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider\") \\\n            .config(\"hive.metastore.uris\", \"thrift://metastore:9083\") \\\n            .config(\"spark.sql.extensions\", \"io.delta.sql.DeltaSparkSessionExtension\") \\\n            .config(\"spark.sql.catalog.spark_catalog\", \"org.apache.spark.sql.delta.catalog.DeltaCatalog\") \\\n            .getOrCreate()\n    return spark\n\ndef ingest_data():\n    \"\"\"Ingest data from AdventureWorks to HDFS.\"\"\"\n\n    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')\n\n    logging.info(\"Starting Processing......\")\n    \n    spark = configure_spark()\n    input_name = configs.prefix_layer_name['1']  # bronze layer\n    hdfs_input = configs.lake_path['bronze']\n    \n    output_name = configs.prefix_layer_name['2']  # silver layer\n    hdfs_output = configs.lake_path['silver']\n\n    for table_name, query in configs.tables_queries_silver.items():        \n        try:\n            df_source = spark.read.format(\"delta\").load(f'{hdfs_input}{input_name}{table_name}')\n\n            df_delta = spark.read.format(\"delta\").load(f'{hdfs_output}{output_name}{table_name}')\n\n            max_modified_date_delta = df_delta.selectExpr(\"max(modifieddate)\").collect()[0][0]\n\n            df_new_data = df_source.filter(df_source[\"modifieddate\"] > max_modified_date_delta)\n            \n            df_with_update_date = df_new_data.withColumn(\"last_update\", lit(datetime.now()))\n\n            df_with_update_date.write.format(\"delta\").mode(\"append\").partitionBy('month_key').save(f'{hdfs_output}{output_name}{table_name}')\n\n            num_rows_written = df_with_update_date.count()\n            logging.info(f\"Table {table_name} successfully processed and saved to Delta Lake: {hdfs_output}{output_name}{table_name}. {num_rows_written} rows written.\")\n\n        except Exception as e:\n            logging.error(f\"Error processing table {table_name}: {str(e)}\")\n\n    logging.info(\"Processing completed!\")\n\nif __name__ == \"__main__\":\n    ingest_data()\n"
+  115_update_gold.py: "import pyspark\nfrom pyspark.sql import SparkSession\nimport logging\nfrom datetime import datetime \nfrom pyspark.sql.functions import lit \n\nfrom configs import configs\nfrom functions import functions as F\n\ndef configure_spark():\n    \"\"\"Configure SparkSession.\"\"\"\n    spark = SparkSession.builder \\\n            .appName(\"Refinement Incremental Silver to Gold AdventureWorks\") \\\n            .config(\"spark.hadoop.fs.s3a.endpoint\", \"http://minio:9000\") \\\n            .config(\"spark.hadoop.fs.s3a.access.key\", \"chapolin\") \\\n            .config(\"spark.hadoop.fs.s3a.secret.key\", \"mudar@123\") \\\n            .config(\"spark.hadoop.fs.s3a.path.style.access\", True) \\\n            .config(\"spark.hadoop.fs.s3a.impl\", \"org.apache.hadoop.fs.s3a.S3AFileSystem\") \\\n            .config(\"spark.hadoop.fs.s3a.aws.credentials.provider\", \"org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider\") \\\n            .config(\"hive.metastore.uris\", \"thrift://metastore:9083\") \\\n            .config(\"spark.sql.extensions\", \"io.delta.sql.DeltaSparkSessionExtension\") \\\n            .config(\"spark.sql.catalog.spark_catalog\", \"org.apache.spark.sql.delta.catalog.DeltaCatalog\") \\\n            .getOrCreate()\n    return spark\n\ndef ingest_data():\n    \"\"\"Ingest data from AdventureWorks to HDFS.\"\"\"\n\n    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')\n\n    logging.info(\"Starting Refinement...\")\n    \n    spark = configure_spark()\n    input_name = configs.prefix_layer_name['2']  # bronze layer\n    hdfs_input = configs.lake_path['silver']\n    \n    output_name = configs.prefix_layer_name['3']  # silver layer\n    hdfs_output = configs.lake_path['gold']\n\n    for table_name, query in configs.tables_gold.items():        \n        try:\n            \n            query = F.get_query(table_name, hdfs_input, input_name, configs.tables_gold)\n            \n            df_input = spark.sql(query)\n            \n            df_output = spark.read.format(\"delta\").load(f'{hdfs_output}{output_name}{table_name}')\n\n            max_modified_date_delta = df_output.selectExpr(\"max(modifieddate)\").collect()[0][0]\n\n            df_new_data = df_input.filter(df_input[\"modifieddate\"] > max_modified_date_delta)\n            \n            df_with_update_date = df_new_data.withColumn(\"last_update\", lit(datetime.now()))\n\n            df_with_update_date.write.format(\"delta\").mode(\"append\").partitionBy('month_key').save(f'{hdfs_output}{output_name}{table_name}')\n\n            num_rows_written = df_with_update_date.count()\n            logging.info(f\"Table {table_name} successfully processed and saved to Delta Lake: {hdfs_output}{output_name}{table_name}. {num_rows_written} rows written.\")\n\n        except Exception as e:\n            logging.error(f\"Error processing table {table_name}: {str(e)}\")\n\n    logging.info(\"Refinement completed!\")\n\nif __name__ == \"__main__\":\n    ingest_data()\n"
+  nb_106_elt_postgres_to_landing_parquet_adventure.ipynb: |
+    {
+     "cells": [
+      {
+       "cell_type": "code",
+       "execution_count": 3,
+       "id": "36767cf0-0606-40cb-9fb6-070661f3355e",
+       "metadata": {},
+       "outputs": [],
+       "source": [
+        "import pyspark\n",
+        "from pyspark.sql import SparkSession\n",
+        "import logging\n",
+        "from configs import configs\n",
+        "from functions import functions as F\n",
+        "\n",
+        "spark = SparkSession.builder \\\n",
+        "        .appName(\"ELT Full Postgres to Landing AdventureWorks\") \\\n",
+        "        .config(\"spark.hadoop.fs.s3a.endpoint\", \"http://minio:9000\") \\\n",
+        "        .config(\"spark.hadoop.fs.s3a.access.key\", \"chapolin\") \\\n",
+        "        .config(\"spark.hadoop.fs.s3a.secret.key\", \"mudar@123\") \\\n",
+        "        .config(\"spark.hadoop.fs.s3a.path.style.access\", True) \\\n",
+        "        .config(\"spark.hadoop.fs.s3a.impl\", \"org.apache.hadoop.fs.s3a.S3AFileSystem\") \\\n",
+        "        .config(\"spark.hadoop.fs.s3a.aws.credentials.provider\", \"org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider\") \\\n",
+        "        .config(\"hive.metastore.uris\", \"thrift://metastore:9083\") \\\n",
+        "        .config(\"spark.sql.extensions\", \"io.delta.sql.DeltaSparkSessionExtension\") \\\n",
+        "        .config(\"spark.sql.catalog.spark_catalog\", \"org.apache.spark.sql.delta.catalog.DeltaCatalog\") \\\n",
+        "        .getOrCreate()\n",
+        "\n",
+        "logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')"
+       ]
+      },
+      {
+       "cell_type": "code",
+       "execution_count": 4,
+       "id": "ba5a636f-1559-40c9-a06c-fe8d5b6ba7a3",
+       "metadata": {},
+       "outputs": [
+        {
+         "name": "stderr",
+         "output_type": "stream",
+         "text": [
+          "2024-07-06 15:35:52,236 - INFO - Starting ingestions from AdventureWorks to Landing Zone...\n",
+          "2024-07-06 15:35:53,359 - INFO - Processing table: sales_countryregioncurrency\n",
+          "2024-07-06 15:35:55,952 - INFO - Table sales_countryregioncurrency successfully processed and saved to HDFS: s3a://landing-zone/adventure_works/sales_countryregioncurrency\n",
+          "2024-07-06 15:35:55,977 - INFO - Processing table: humanresources_department\n",
+          "2024-07-06 15:35:56,442 - INFO - Table humanresources_department successfully processed and saved to HDFS: s3a://landing-zone/adventure_works/humanresources_department\n",
+          "2024-07-06 15:35:56,469 - INFO - Processing table: humanresources_employee\n",
+          "2024-07-06 15:35:57,085 - INFO - Table humanresources_employee successfully processed and saved to HDFS: s3a://landing-zone/adventure_works/humanresources_employee\n",
+          "2024-07-06 15:35:57,117 - INFO - Processing table: sales_salesorderheader\n",
+          "2024-07-06 15:36:00,143 - INFO - Table sales_salesorderheader successfully processed and saved to HDFS: s3a://landing-zone/adventure_works/sales_salesorderheader\n",
+          "2024-07-06 15:36:00,144 - INFO - Ingestions to Landing Zone completed!\n"
+         ]
+        }
+       ],
+       "source": [
+        "logging.info(\"Starting ingestions from AdventureWorks to Landing Zone...\")\n",
+        "\n",
+        "for table_input_name in configs.tables_postgres_adventureworks.values():\n",
+        "    try:\n",
+        "        table_input_path = F.convert_table_name(table_input_name)\n",
+        "        \n",
+        "\n",
+        "        df_input_data = spark.read \\\n",
+        "            .format(\"jdbc\") \\\n",
+        "            .option(\"url\", \"jdbc:postgresql://172.21.121.140:5435/Adventureworks\") \\\n",
+        "            .option(\"user\", \"postgres\") \\\n",
+        "            .option(\"dbtable\", table_input_name) \\\n",
+        "            .option(\"password\", \"postgres\") \\\n",
+        "            .option(\"driver\", \"org.postgresql.Driver\") \\\n",
+        "            .load()\n",
+        "\n",
+        "        output_table_name = configs.lake_path['landing_zone_adventure_works']\n",
+        "        output_table_path = f\"{output_table_name}{table_input_path}\"\n",
+        "        \n",
+        "        logging.info(f\"Processing table: {table_input_path}\")\n",
+        "        \n",
+        "\n",
+        "        df_with_update_date = F.add_metadata(df_input_data)\n",
+        "        \n",
+        "\n",
+        "        df_with_month_key = F.add_month_key_column(df_with_update_date, 'modifieddate')\n",
+        "            \n",
+        "        df_with_month_key.write.format(\"parquet\").mode(\"overwrite\").partitionBy('month_key').save(output_table_path)\n",
+        "        \n",
+        "        logging.info(f\"Table {table_input_path} successfully processed and saved to HDFS: {output_table_path}\")\n",
+        "\n",
+        "    except Exception as e:\n",
+        "\n",
+        "        logging.error(f\"Error processing table {table_input_name}: {str(e)}\")\n",
+        "\n",
+        "\n",
+        "logging.info(\"Ingestions to Landing Zone completed!\")\n"
+       ]
+      }
+     ],
+     "metadata": {
+      "kernelspec": {
+       "display_name": "Python 3 (ipykernel)",
+       "language": "python",
+       "name": "python3"
+      },
+      "language_info": {
+       "codemirror_mode": {
+        "name": "ipython",
+        "version": 3
+       },
+       "file_extension": ".py",
+       "mimetype": "text/x-python",
+       "name": "python",
+       "nbconvert_exporter": "python",
+       "pygments_lexer": "ipython3",
+       "version": "3.10.8"
+      }
+     },
+     "nbformat": 4,
+     "nbformat_minor": 5
+    }
+  nb_107_elt_landing_to_bronze_delta_adventure.ipynb: |
+    {
+     "cells": [
+      {
+       "cell_type": "code",
+       "execution_count": 1,
+       "id": "39355a9d-db91-4192-bcb7-d56b06d95776",
+       "metadata": {},
+       "outputs": [],
+       "source": [
+        "import pyspark\n",
+        "from pyspark.sql import SparkSession\n",
+        "import logging\n",
+        "from datetime import datetime  \n",
+        "from pyspark.sql.functions import lit \n",
+        "from configs import configs\n",
+        "from functions import functions as F\n",
+        "\n",
+        "spark = SparkSession.builder \\\n",
+        "        .appName(\"ELT Full Landing to Bronze AdventureWorks\") \\\n",
+        "        .config(\"spark.hadoop.fs.s3a.endpoint\", \"http://minio:9000\") \\\n",
+        "        .config(\"spark.hadoop.fs.s3a.access.key\", \"chapolin\") \\\n",
+        "        .config(\"spark.hadoop.fs.s3a.secret.key\", \"mudar@123\") \\\n",
+        "        .config(\"spark.hadoop.fs.s3a.path.style.access\", True) \\\n",
+        "        .config(\"spark.hadoop.fs.s3a.impl\", \"org.apache.hadoop.fs.s3a.S3AFileSystem\") \\\n",
+        "        .config(\"spark.hadoop.fs.s3a.aws.credentials.provider\", \"org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider\") \\\n",
+        "        .config(\"hive.metastore.uris\", \"thrift://metastore:9083\") \\\n",
+        "        .config(\"spark.sql.extensions\", \"io.delta.sql.DeltaSparkSessionExtension\") \\\n",
+        "        .config(\"spark.sql.catalog.spark_catalog\", \"org.apache.spark.sql.delta.catalog.DeltaCatalog\") \\\n",
+        "        .getOrCreate()\n",
+        "\n",
+        "logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')"
+       ]
+      },
+      {
+       "cell_type": "code",
+       "execution_count": 2,
+       "id": "5968ace2-abc3-4444-8076-44a5b608ecdb",
+       "metadata": {},
+       "outputs": [
+        {
+         "name": "stderr",
+         "output_type": "stream",
+         "text": [
+          "2024-07-03 22:55:14,153 - INFO - Starting ingestions from Landing Zone to Bronze...\n",
+          "2024-07-03 22:55:14,155 - INFO - Starting ingestions to bronze layer...\n",
+          "2024-07-03 22:55:28,590 - INFO - Table sales_countryregioncurrency successfully processed and saved to HDFS: s3a://bronze/adventure_works/bronze_sales_countryregioncurrency\n",
+          "2024-07-03 22:55:31,679 - INFO - Table humanresources_department successfully processed and saved to HDFS: s3a://bronze/adventure_works/bronze_humanresources_department\n",
+          "2024-07-03 22:55:33,862 - INFO - Table humanresources_employee successfully processed and saved to HDFS: s3a://bronze/adventure_works/bronze_humanresources_employee\n",
+          "2024-07-03 22:55:37,972 - INFO - Table sales_salesorderheader successfully processed and saved to HDFS: s3a://bronze/adventure_works/bronze_sales_salesorderheader\n",
+          "2024-07-03 22:55:37,973 - INFO - Ingestions to bronze layer completed!\n"
+         ]
+        }
+       ],
+       "source": [
+        "logging.info(\"Starting ingestions from Landing Zone to Bronze...\")\n",
+        "\n",
+        "table_input_name = configs.lake_path['landing_zone_adventure_works']  \n",
+        "output_prefix_layer_name = configs.prefix_layer_name['1']\n",
+        "storage_output = configs.lake_path['bronze']  \n",
+        "\n",
+        "logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')\n",
+        "\n",
+        "\n",
+        "logging.info(\"Starting ingestions to bronze layer...\")\n",
+        "\n",
+        "for key, value in configs.tables_postgres_adventureworks.items():\n",
+        "    table = value\n",
+        "    table_name = F.convert_table_name(table)\n",
+        "    \n",
+        "    try:\n",
+        "        df_input_data = spark.read.format(\"parquet\").load(f'{table_input_name}{table_name}') \n",
+        "        df_with_update_date = df_input_data.withColumn(\"last_update\", lit(datetime.now()))\n",
+        "        df_with_update_date.write.format(\"delta\").mode(\"overwrite\").partitionBy('month_key').save(f'{storage_output}{output_prefix_layer_name}{table_name}')        \n",
+        "        logging.info(f\"Table {table_name} successfully processed and saved to HDFS: {storage_output}{output_prefix_layer_name}{table_name}\")\n",
+        "        \n",
+        "    except Exception as e:\n",
+        "        logging.error(f\"Error processing table {table}: {str(e)}\")\n",
+        "\n",
+        "logging.info(\"Ingestions to bronze layer completed!\")\n"
+       ]
+      }
+     ],
+     "metadata": {
+      "kernelspec": {
+       "display_name": "Python 3 (ipykernel)",
+       "language": "python",
+       "name": "python3"
+      },
+      "language_info": {
+       "codemirror_mode": {
+        "name": "ipython",
+        "version": 3
+       },
+       "file_extension": ".py",
+       "mimetype": "text/x-python",
+       "name": "python",
+       "nbconvert_exporter": "python",
+       "pygments_lexer": "ipython3",
+       "version": "3.10.8"
+      }
+     },
+     "nbformat": 4,
+     "nbformat_minor": 5
+    }
+  nb_108_process_bronze_to_silver_delta_adventure.ipynb: |
+    {
+     "cells": [
+      {
+       "cell_type": "code",
+       "execution_count": 1,
+       "id": "294036ec-a10d-412d-bef8-2a2e31621660",
+       "metadata": {},
+       "outputs": [],
+       "source": [
+        "import pyspark\n",
+        "from pyspark.sql import SparkSession\n",
+        "import logging\n",
+        "from datetime import datetime  \n",
+        "\n",
+        "from pyspark.sql.functions import lit  \n",
+        "\n",
+        "from configs import configs\n",
+        "from functions import functions as F"
+       ]
+      },
+      {
+       "cell_type": "code",
+       "execution_count": 2,
+       "id": "4da3e528-0611-47aa-9085-1fef497f52fa",
+       "metadata": {},
+       "outputs": [
+        {
+         "name": "stderr",
+         "output_type": "stream",
+         "text": [
+          "2024-07-02 11:03:31,223 - INFO - Starting Process to Silver...\n",
+          "2024-07-02 11:03:41,053 - INFO - Query 'SELECT * FROM delta.`s3a://bronze/adventure_works/bronze_sales_countryregioncurrency`' successfully processed and saved to s3a://silver/adventure_works/silver_sales_countryregioncurrency\n",
+          "2024-07-02 11:03:43,434 - INFO - Query 'SELECT * FROM delta.`s3a://bronze/adventure_works/bronze_humanresources_department`' successfully processed and saved to s3a://silver/adventure_works/silver_humanresources_department\n",
+          "2024-07-02 11:03:45,312 - INFO - Query 'SELECT * FROM delta.`s3a://bronze/adventure_works/bronze_humanresources_employee`' successfully processed and saved to s3a://silver/adventure_works/silver_humanresources_employee\n",
+          "2024-07-02 11:03:47,898 - INFO - Query 'SELECT * FROM delta.`s3a://bronze/adventure_works/bronze_sales_salesorderheader`' successfully processed and saved to s3a://silver/adventure_works/silver_sales_salesorderheader\n",
+          "2024-07-02 11:03:47,899 - INFO - Process to Silver completed!\n"
+         ]
+        }
+       ],
+       "source": [
+        "def process_table(spark, query_input, output_path):\n",
+        "    try:\n",
+        "        df_input_data = spark.sql(query_input)\n",
+        "        df_with_update_date = df_input_data.withColumn(\"last_update\", lit(datetime.now()))\n",
+        "        df_with_update_date.write.format(\"delta\").mode(\"overwrite\").partitionBy('month_key').save(output_path)\n",
+        "        logging.info(f\"Query '{query_input}' successfully processed and saved to {output_path}\")\n",
+        "    except Exception as e:\n",
+        "        logging.error(f\"Error processing query '{query_input}': {str(e)}\")\n",
+        "\n",
+        "if __name__ == \"__main__\":\n",
+        "    spark = SparkSession.builder \\\n",
+        "        .appName(\"Process Full Bronze to Silver\") \\\n",
+        "        .config(\"spark.hadoop.fs.s3a.endpoint\", \"http://minio:9000\") \\\n",
+        "        .config(\"spark.hadoop.fs.s3a.access.key\", \"chapolin\") \\\n",
+        "        .config(\"spark.hadoop.fs.s3a.secret.key\", \"mudar@123\") \\\n",
+        "        .config(\"spark.hadoop.fs.s3a.path.style.access\", True) \\\n",
+        "        .config(\"spark.hadoop.fs.s3a.impl\", \"org.apache.hadoop.fs.s3a.S3AFileSystem\") \\\n",
+        "        .config(\"spark.hadoop.fs.s3a.aws.credentials.provider\", \"org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider\") \\\n",
+        "        .config(\"hive.metastore.uris\", \"thrift://metastore:9083\") \\\n",
+        "        .config(\"spark.sql.extensions\", \"io.delta.sql.DeltaSparkSessionExtension\") \\\n",
+        "        .config(\"spark.sql.catalog.spark_catalog\", \"org.apache.spark.sql.delta.catalog.DeltaCatalog\") \\\n",
+        "        .getOrCreate()\n",
+        "\n",
+        "    input_prefix_layer_name = configs.prefix_layer_name['1']  # silver layer\n",
+        "    input_path = configs.lake_path['bronze']\n",
+        "\n",
+        "    output_prefix_layer_name = configs.prefix_layer_name['2']  # gold layer\n",
+        "    output_path = configs.lake_path['silver']\n",
+        "\n",
+        "    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')\n",
+        "\n",
+        "    logging.info(\"Starting Process to Silver...\")\n",
+        "\n",
+        "    try:\n",
+        "        for table_name, query_input in configs.tables_queries_silver.items():  \n",
+        "            table_name = F.convert_table_name(table_name)\n",
+        "\n",
+        "            query_input = F.get_query(table_name, input_path, input_prefix_layer_name, configs.tables_queries_silver)\n",
+        "    \n",
+        "            storage_output = f\"{output_path}{output_prefix_layer_name}{table_name}\"\n",
+        "            \n",
+        "            process_table(spark, query_input, storage_output)\n",
+        "        \n",
+        "        logging.info(\"Process to Silver completed!\")\n",
+        "    except Exception as e:\n",
+        "        logging.error(f\"Error processing table: {str(e)}\")\n"
+       ]
+      }
+     ],
+     "metadata": {
+      "kernelspec": {
+       "display_name": "Python 3 (ipykernel)",
+       "language": "python",
+       "name": "python3"
+      },
+      "language_info": {
+       "codemirror_mode": {
+        "name": "ipython",
+        "version": 3
+       },
+       "file_extension": ".py",
+       "mimetype": "text/x-python",
+       "name": "python",
+       "nbconvert_exporter": "python",
+       "pygments_lexer": "ipython3",
+       "version": "3.10.8"
+      }
+     },
+     "nbformat": 4,
+     "nbformat_minor": 5
+    }
+  nb_109_refinement_silver_to_gold_delta_aventure.ipynb: |
+    {
+     "cells": [
+      {
+       "cell_type": "code",
+       "execution_count": 1,
+       "metadata": {},
+       "outputs": [],
+       "source": [
+        "import pyspark\n",
+        "from pyspark.sql import SparkSession\n",
+        "import logging\n",
+        "from datetime import datetime  \n",
+        "\n",
+        "from pyspark.sql.functions import lit  \n",
+        "\n",
+        "from configs import configs\n",
+        "from functions import functions as F"
+       ]
+      },
+      {
+       "cell_type": "code",
+       "execution_count": 2,
+       "metadata": {},
+       "outputs": [
+        {
+         "name": "stderr",
+         "output_type": "stream",
+         "text": [
+          "2024-07-02 11:03:55,921 - INFO - Starting refinement to Gold...\n",
+          "2024-07-02 11:04:05,541 - INFO - Query '\n",
+          "SELECT \n",
+          "    departmentid, \n",
+          "    name, \n",
+          "    groupname, \n",
+          "    modifieddate, \n",
+          "    last_update, \n",
+          "    month_key \n",
+          "FROM \n",
+          "    delta.`s3a://silver/adventure_works/silver_humanresources_department`;\n",
+          "    ' successfully processed and saved to s3a://gold/adventure_works/gold_humanresources_department\n",
+          "2024-07-02 11:04:07,384 - INFO - Query '\n",
+          "SELECT \n",
+          "    groupname, \n",
+          "    modifieddate,\n",
+          "    last_update, \n",
+          "    month_key, \n",
+          "    count(*) as qtd\n",
+          "FROM \n",
+          "    delta.`s3a://silver/adventure_works/silver_humanresources_department`\n",
+          "group by \n",
+          "\tgroupname,\n",
+          "\tmodifieddate,\n",
+          "    last_update, \n",
+          "    month_key ;\n",
+          "    ' successfully processed and saved to s3a://gold/adventure_works/gold_humanresources_groupname_qtd\n",
+          "2024-07-02 11:04:07,385 - INFO - Refinement to Gold completed!\n"
+         ]
+        }
+       ],
+       "source": [
+        "def process_table(spark, query_input, output_table_path):\n",
+        "    try:\n",
+        "        df_input_data = spark.sql(query_input)\n",
+        "        df_with_update_date = df_input_data.withColumn(\"last_update\", lit(datetime.now()))\n",
+        "        df_with_update_date.write.format(\"delta\").mode(\"overwrite\").partitionBy('month_key').save(output_table_path)\n",
+        "        logging.info(f\"Query '{query_input}' successfully processed and saved to {output_table_path}\")\n",
+        "    except Exception as e:\n",
+        "        logging.error(f\"Error processing query '{query_input}': {str(e)}\")\n",
+        "\n",
+        "if __name__ == \"__main__\":\n",
+        "    spark = SparkSession.builder \\\n",
+        "        .appName(\"Refinement Full Silver to Gold\") \\\n",
+        "        .config(\"spark.hadoop.fs.s3a.endpoint\", \"http://minio:9000\") \\\n",
+        "        .config(\"spark.hadoop.fs.s3a.access.key\", \"chapolin\") \\\n",
+        "        .config(\"spark.hadoop.fs.s3a.secret.key\", \"mudar@123\") \\\n",
+        "        .config(\"spark.hadoop.fs.s3a.path.style.access\", True) \\\n",
+        "        .config(\"spark.hadoop.fs.s3a.impl\", \"org.apache.hadoop.fs.s3a.S3AFileSystem\") \\\n",
+        "        .config(\"spark.hadoop.fs.s3a.aws.credentials.provider\", \"org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider\") \\\n",
+        "        .config(\"hive.metastore.uris\", \"thrift://metastore:9083\") \\\n",
+        "        .config(\"spark.sql.extensions\", \"io.delta.sql.DeltaSparkSessionExtension\") \\\n",
+        "        .config(\"spark.sql.catalog.spark_catalog\", \"org.apache.spark.sql.delta.catalog.DeltaCatalog\") \\\n",
+        "        .getOrCreate()\n",
+        "\n",
+        " \n",
+        "    input_prefix_layer_name = configs.prefix_layer_name['2']  # silver layer\n",
+        "    input_path = configs.lake_path['silver']\n",
+        "    output_prefix_layer_name = configs.prefix_layer_name['3']  # gold layer\n",
+        "    output_path = configs.lake_path['gold']\n",
+        "\n",
+        "  \n",
+        "    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')\n",
+        "\n",
+        "\n",
+        "    logging.info(\"Starting refinement to Gold...\")\n",
+        "\n",
+        "\n",
+        "    try:\n",
+        "        for table_name, query_input in configs.tables_gold.items(): \n",
+        "            table_name = F.convert_table_name(table_name)\n",
+        "\n",
+        "            query_input = F.get_query(table_name, input_path, input_prefix_layer_name, configs.tables_gold)\n",
+        "\n",
+        "            storage_output= f\"{output_path}{output_prefix_layer_name}{table_name}\"\n",
+        "\n",
+        "            process_table(spark, query_input, storage_output)  \n",
+        "        \n",
+        "        logging.info(\"Refinement to Gold completed!\")\n",
+        "    except Exception as e:\n",
+        "        logging.error(f\"Error processing table: {str(e)}\")\n"
+       ]
+      }
+     ],
+     "metadata": {
+      "kernelspec": {
+       "display_name": "Python 3 (ipykernel)",
+       "language": "python",
+       "name": "python3"
+      },
+      "language_info": {
+       "codemirror_mode": {
+        "name": "ipython",
+        "version": 3
+       },
+       "file_extension": ".py",
+       "mimetype": "text/x-python",
+       "name": "python",
+       "nbconvert_exporter": "python",
+       "pygments_lexer": "ipython3",
+       "version": "3.10.8"
+      }
+     },
+     "nbformat": 4,
+     "nbformat_minor": 4
+    }
+  nb_112_update_landing.ipynb: |
+    {
+     "cells": [
+      {
+       "cell_type": "code",
+       "execution_count": 1,
+       "id": "86f6e6bb-d36e-4d5d-a9f7-45580a2e452c",
+       "metadata": {},
+       "outputs": [],
+       "source": [
+        "import pyspark\n",
+        "from pyspark.sql import SparkSession\n",
+        "import logging\n",
+        "from configs import configs\n",
+        "from functions import functions as F\n",
+        "import time"
+       ]
+      },
+      {
+       "cell_type": "code",
+       "execution_count": 2,
+       "id": "2fe6ad3d-1373-4e49-83ef-b3b4683ef031",
+       "metadata": {},
+       "outputs": [
+        {
+         "name": "stderr",
+         "output_type": "stream",
+         "text": [
+          "2024-07-02 11:04:45,183 - INFO - Starting ingestions from Postgres - AdventureWorks to S3 Data Lake...\n",
+          "2024-07-02 11:04:49,253 - INFO - Processing table: sales.countryregioncurrency. Source: PostgreSQL, Target: Delta Lake.\n",
+          "2024-07-02 11:04:52,266 - INFO - No new data found for table sales.countryregioncurrency. Skipping ingestion.\n",
+          "2024-07-02 11:04:52,284 - INFO - Processing table: humanresources.department. Source: PostgreSQL, Target: Delta Lake.\n",
+          "2024-07-02 11:04:52,663 - INFO - No new data found for table humanresources.department. Skipping ingestion.\n",
+          "2024-07-02 11:04:52,685 - INFO - Processing table: humanresources.employee. Source: PostgreSQL, Target: Delta Lake.\n",
+          "2024-07-02 11:04:53,092 - INFO - No new data found for table humanresources.employee. Skipping ingestion.\n",
+          "2024-07-02 11:04:53,119 - INFO - Processing table: sales.salesorderheader. Source: PostgreSQL, Target: Delta Lake.\n",
+          "2024-07-02 11:04:53,889 - INFO - No new data found for table sales.salesorderheader. Skipping ingestion.\n",
+          "2024-07-02 11:04:53,889 - INFO - Ingestions from Postgres - AdventureWorks to S3 Data Lake completed!\n"
+         ]
+        }
+       ],
+       "source": [
+        "def get_credential_source():\n",
+        "    \"\"\"Get the credentials for the data source.\"\"\"\n",
+        "    credential_source = configs.credential_jdbc_postgres_adventureworks\n",
+        "    return {\n",
+        "        'url': credential_source['url'],\n",
+        "        'user': credential_source['user'],\n",
+        "        'password': credential_source['password'],\n",
+        "        'driver': credential_source['driver']\n",
+        "    }\n",
+        "\n",
+        "def get_data(table_input_name, spark, credential_source):\n",
+        "    \"\"\"Get data from PostgreSQL table and return a DataFrame.\"\"\"\n",
+        "    return spark.read \\\n",
+        "        .format(\"jdbc\") \\\n",
+        "        .option(\"url\", credential_source['url']) \\\n",
+        "        .option(\"user\", credential_source['user']) \\\n",
+        "        .option(\"dbtable\", table_input_name) \\\n",
+        "        .option(\"password\", credential_source['password']) \\\n",
+        "        .option(\"driver\", credential_source['driver']) \\\n",
+        "        .load()\n",
+        "\n",
+        "def compare_data(df_input_data, storage_output, spark):\n",
+        "    \"\"\"Compare data from source with target and return DataFrame with new records.\"\"\"\n",
+        "\n",
+        "    df_output = spark.read.format(\"parquet\").load(storage_output)\n",
+        "    \n",
+        "    max_date_storage_output = df_output.selectExpr(\"max(modifieddate)\").collect()[0][0]\n",
+        "    \n",
+        "    new_records_df = df_input_data.filter(df_input_data[\"modifieddate\"] > max_date_storage_output)\n",
+        "    \n",
+        "    return new_records_df\n",
+        "\n",
+        "def process_table(table_name, df_input_data, storage_output, spark):\n",
+        "    \"\"\"Process table by adding metadata and inserting new records.\"\"\"\n",
+        "    logging.info(f\"Processing table: {table_name}. Source: PostgreSQL, Target: Delta Lake.\")\n",
+        "    start_time = time.time()\n",
+        "    \n",
+        "    df_with_metadata = F.add_metadata(df_input_data)\n",
+        "    \n",
+        "    df_with_month_key = F.add_month_key_column(df_with_metadata, 'modifieddate')\n",
+        "    \n",
+        "    new_records_df = compare_data(df_with_month_key, storage_output, spark)\n",
+        "    \n",
+        "    if new_records_df.rdd.isEmpty():\n",
+        "        logging.info(f\"No new data found for table {table_name}. Skipping ingestion.\")\n",
+        "    else:\n",
+        "        num_rows_written = write_data(new_records_df, storage_output, spark)\n",
+        "        end_time = time.time()\n",
+        "        duration = end_time - start_time\n",
+        "        logging.info(f\"Table {table_name} processed in {duration:.2f} seconds. {num_rows_written} new rows written.\")\n",
+        "    \n",
+        "def write_data(df_with_month_key, storage_output, spark):\n",
+        "    \"\"\"Save new partitioned data to target and return the number of rows written.\"\"\"\n",
+        "    start_time = time.time()\n",
+        "    df_with_month_key.write.format(\"parquet\").mode(\"append\").partitionBy('month_key').save(storage_output)\n",
+        "    num_rows_written = df_with_month_key.count()\n",
+        "    end_time = time.time()\n",
+        "    duration = end_time - start_time\n",
+        "    logging.info(f\"New data processed and appended to target for table {storage_output} in {duration:.2f} seconds. {num_rows_written} rows written.\")\n",
+        "    return num_rows_written\n",
+        "\n",
+        "def main(app_name, source_name, target_name, spark_configs):\n",
+        "\n",
+        "    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')\n",
+        "\n",
+        "    logging.info(f\"Starting ingestions from {source_name} to {target_name}...\")\n",
+        "\n",
+        "    spark = SparkSession.builder \\\n",
+        "        .appName(app_name) \\\n",
+        "        .config(\"spark.hadoop.fs.s3a.endpoint\", spark_configs['s3_endpoint']) \\\n",
+        "        .config(\"spark.hadoop.fs.s3a.access.key\", spark_configs['s3_access_key']) \\\n",
+        "        .config(\"spark.hadoop.fs.s3a.secret.key\", spark_configs['s3_secret_key']) \\\n",
+        "        .config(\"spark.hadoop.fs.s3a.path.style.access\", spark_configs['s3_path_style_access']) \\\n",
+        "        .config(\"spark.hadoop.fs.s3a.impl\", spark_configs['s3_impl']) \\\n",
+        "        .config(\"spark.hadoop.fs.s3a.aws.credentials.provider\", spark_configs['s3_credentials_provider']) \\\n",
+        "        .config(\"hive.metastore.uris\", spark_configs['hive_metastore_uris']) \\\n",
+        "        .config(\"spark.sql.extensions\", spark_configs['delta_sql_extension']) \\\n",
+        "        .config(\"spark.sql.catalog.spark_catalog\", spark_configs['delta_catalog']) \\\n",
+        "        .getOrCreate()\n",
+        "\n",
+        "    credential_source = get_credential_source() \n",
+        "    \n",
+        "    for table_name in configs.tables_postgres_adventureworks.values():\n",
+        "        try:\n",
+        "            table_name_hdfs = F.convert_table_name(table_name)\n",
+        "            df_input_data = get_data(table_name, spark, credential_source)  \n",
+        "            lake_path = configs.lake_path['landing_zone_adventure_works']\n",
+        "            storage_output = f\"{lake_path}{table_name_hdfs}\"\n",
+        "            \n",
+        "            process_table(table_name, df_input_data, storage_output, spark)\n",
+        "        except Exception as e:\n",
+        "\n",
+        "            logging.error(f\"Error processing table {table_name}: {str(e)}\")\n",
+        "\n",
+        "    logging.info(f\"Ingestions from {source_name} to {target_name} completed!\")\n",
+        "\n",
+        "\n",
+        "if __name__ == \"__main__\":\n",
+        "    app_name = 'ELT Incremental Postgres to Landing AdventureWorks'\n",
+        "    source_name = 'Postgres - AdventureWorks'\n",
+        "    target_name = 'S3 Data Lake'\n",
+        "    spark_configs = configs.spark_configs_s3\n",
+        "    \n",
+        "    main(app_name, source_name, target_name, spark_configs)\n"
+       ]
+      }
+     ],
+     "metadata": {
+      "kernelspec": {
+       "display_name": "Python 3 (ipykernel)",
+       "language": "python",
+       "name": "python3"
+      },
+      "language_info": {
+       "codemirror_mode": {
+        "name": "ipython",
+        "version": 3
+       },
+       "file_extension": ".py",
+       "mimetype": "text/x-python",
+       "name": "python",
+       "nbconvert_exporter": "python",
+       "pygments_lexer": "ipython3",
+       "version": "3.10.8"
+      }
+     },
+     "nbformat": 4,
+     "nbformat_minor": 5
+    }
+  nb_113_update_bronze.ipynb: |
+    {
+     "cells": [
+      {
+       "cell_type": "code",
+       "execution_count": 1,
+       "id": "bfd54164-7f00-44d8-8617-03708fc99fcd",
+       "metadata": {},
+       "outputs": [],
+       "source": [
+        "import pyspark\n",
+        "from pyspark.sql import SparkSession\n",
+        "import logging\n",
+        "from datetime import datetime  \n",
+        "\n",
+        "from pyspark.sql.functions import lit  \n",
+        "\n",
+        "from configs import configs\n",
+        "from functions import functions as F"
+       ]
+      },
+      {
+       "cell_type": "code",
+       "execution_count": 2,
+       "id": "2449e202-132f-4cbd-baf5-2badef79ded3",
+       "metadata": {},
+       "outputs": [
+        {
+         "name": "stderr",
+         "output_type": "stream",
+         "text": [
+          "2024-07-02 11:05:06,879 - INFO - Ingestion Delta...\n",
+          "2024-07-02 11:05:15,471 - INFO - Table sales_countryregioncurrency successfully processed and saved to Delta Lake: s3a://bronze/adventure_works/bronze_sales_countryregioncurrency. 0 rows written.\n",
+          "2024-07-02 11:05:17,222 - INFO - Table humanresources_department successfully processed and saved to Delta Lake: s3a://bronze/adventure_works/bronze_humanresources_department. 0 rows written.\n",
+          "2024-07-02 11:05:18,782 - INFO - Table humanresources_employee successfully processed and saved to Delta Lake: s3a://bronze/adventure_works/bronze_humanresources_employee. 0 rows written.\n",
+          "2024-07-02 11:05:20,899 - INFO - Table sales_salesorderheader successfully processed and saved to Delta Lake: s3a://bronze/adventure_works/bronze_sales_salesorderheader. 0 rows written.\n",
+          "2024-07-02 11:05:20,900 - INFO - Ingestion Delta completed!\n"
+         ]
+        }
+       ],
+       "source": [
+        "def configure_spark():\n",
+        "    \"\"\"Configure SparkSession.\"\"\"\n",
+        "    spark = SparkSession.builder \\\n",
+        "            .appName(\"ELT Incremental Landing to Bronze AdventureWorks\") \\\n",
+        "            .config(\"spark.hadoop.fs.s3a.endpoint\", \"http://minio:9000\") \\\n",
+        "            .config(\"spark.hadoop.fs.s3a.access.key\", \"chapolin\") \\\n",
+        "            .config(\"spark.hadoop.fs.s3a.secret.key\", \"mudar@123\") \\\n",
+        "            .config(\"spark.hadoop.fs.s3a.path.style.access\", True) \\\n",
+        "            .config(\"spark.hadoop.fs.s3a.impl\", \"org.apache.hadoop.fs.s3a.S3AFileSystem\") \\\n",
+        "            .config(\"spark.hadoop.fs.s3a.aws.credentials.provider\", \"org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider\") \\\n",
+        "            .config(\"hive.metastore.uris\", \"thrift://metastore:9083\") \\\n",
+        "            .config(\"spark.sql.extensions\", \"io.delta.sql.DeltaSparkSessionExtension\") \\\n",
+        "            .config(\"spark.sql.catalog.spark_catalog\", \"org.apache.spark.sql.delta.catalog.DeltaCatalog\") \\\n",
+        "            .getOrCreate()\n",
+        "    return spark\n",
+        "\n",
+        "def ingest_data():\n",
+        "    \"\"\"Ingest data from AdventureWorks to HDFS.\"\"\"\n",
+        "\n",
+        "    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')\n",
+        "\n",
+        "    logging.info(\"Ingestion Delta...\")\n",
+        "\n",
+        "    table_input_name = configs.lake_path['landing_zone_adventure_works']\n",
+        "    output_prefix_layer_name = configs.prefix_layer_name['1']  # bronze layer\n",
+        "    storage_output = configs.lake_path['bronze']\n",
+        "\n",
+        "    for key, value in configs.tables_postgres_adventureworks.items():\n",
+        "        table = value\n",
+        "        table_name = F.convert_table_name(table)\n",
+        "\n",
+        "        try:\n",
+        "            df_input_data = spark.read.format(\"parquet\").load(f'{table_input_name}{table_name}')\n",
+        "\n",
+        "            df_delta = spark.read.format(\"delta\").load(f'{storage_output}{output_prefix_layer_name}{table_name}')\n",
+        "\n",
+        "            max_modified_date_delta = df_delta.selectExpr(\"max(modifieddate)\").collect()[0][0]\n",
+        "\n",
+        "            df_new_data = df_input_data.filter(df_input_data[\"modifieddate\"] > max_modified_date_delta)\n",
+        "            \n",
+        "            df_with_update_date = df_new_data.withColumn(\"last_update\", lit(datetime.now()))\n",
+        "\n",
+        "            df_with_update_date.write.format(\"delta\").mode(\"append\").partitionBy('month_key').save(f'{storage_output}{output_prefix_layer_name}{table_name}')\n",
+        "\n",
+        "            num_rows_written = df_with_update_date.count()\n",
+        "            logging.info(f\"Table {table_name} successfully processed and saved to Delta Lake: {storage_output}{output_prefix_layer_name}{table_name}. {num_rows_written} rows written.\")\n",
+        "\n",
+        "        except Exception as e:\n",
+        "            logging.error(f\"Error processing table {table}: {str(e)}\")\n",
+        "\n",
+        "    logging.info(\"Ingestion Delta completed!\")\n",
+        "\n",
+        "if __name__ == \"__main__\":\n",
+        "    spark = configure_spark()\n",
+        "    ingest_data()\n"
+       ]
+      }
+     ],
+     "metadata": {
+      "kernelspec": {
+       "display_name": "Python 3 (ipykernel)",
+       "language": "python",
+       "name": "python3"
+      },
+      "language_info": {
+       "codemirror_mode": {
+        "name": "ipython",
+        "version": 3
+       },
+       "file_extension": ".py",
+       "mimetype": "text/x-python",
+       "name": "python",
+       "nbconvert_exporter": "python",
+       "pygments_lexer": "ipython3",
+       "version": "3.10.8"
+      }
+     },
+     "nbformat": 4,
+     "nbformat_minor": 5
+    }
+  nb_114_update_silver.ipynb: |
+    {
+     "cells": [
+      {
+       "cell_type": "code",
+       "execution_count": 1,
+       "id": "24f90e25-c7e1-4c63-ae19-85901f5fc20f",
+       "metadata": {},
+       "outputs": [],
+       "source": [
+        "import pyspark\n",
+        "from pyspark.sql import SparkSession\n",
+        "import logging\n",
+        "from datetime import datetime \n",
+        "\n",
+        "from pyspark.sql.functions import lit\n",
+        "\n",
+        "from configs import configs\n",
+        "from functions import functions as F"
+       ]
+      },
+      {
+       "cell_type": "code",
+       "execution_count": 2,
+       "id": "a593f94b-9ced-4436-983d-45ad00d053b2",
+       "metadata": {},
+       "outputs": [
+        {
+         "name": "stderr",
+         "output_type": "stream",
+         "text": [
+          "2024-07-02 11:05:28,095 - INFO - Starting Processing......\n",
+          "2024-07-02 11:05:40,056 - INFO - Table sales_countryregioncurrency successfully processed and saved to Delta Lake: s3a://silver/adventure_works/silver_sales_countryregioncurrency. 0 rows written.\n",
+          "2024-07-02 11:05:42,417 - INFO - Table humanresources_department successfully processed and saved to Delta Lake: s3a://silver/adventure_works/silver_humanresources_department. 0 rows written.\n",
+          "2024-07-02 11:05:44,380 - INFO - Table humanresources_employee successfully processed and saved to Delta Lake: s3a://silver/adventure_works/silver_humanresources_employee. 0 rows written.\n",
+          "2024-07-02 11:05:46,511 - INFO - Table sales_salesorderheader successfully processed and saved to Delta Lake: s3a://silver/adventure_works/silver_sales_salesorderheader. 0 rows written.\n",
+          "2024-07-02 11:05:46,512 - INFO - Processing completed!\n"
+         ]
+        }
+       ],
+       "source": [
+        "def configure_spark():\n",
+        "    \"\"\"Configure SparkSession.\"\"\"\n",
+        "    spark = SparkSession.builder \\\n",
+        "            .appName(\"Process Incremental Bronze to Silver AdventureWorks\") \\\n",
+        "            .config(\"spark.hadoop.fs.s3a.endpoint\", \"http://minio:9000\") \\\n",
+        "            .config(\"spark.hadoop.fs.s3a.access.key\", \"chapolin\") \\\n",
+        "            .config(\"spark.hadoop.fs.s3a.secret.key\", \"mudar@123\") \\\n",
+        "            .config(\"spark.hadoop.fs.s3a.path.style.access\", True) \\\n",
+        "            .config(\"spark.hadoop.fs.s3a.impl\", \"org.apache.hadoop.fs.s3a.S3AFileSystem\") \\\n",
+        "            .config(\"spark.hadoop.fs.s3a.aws.credentials.provider\", \"org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider\") \\\n",
+        "            .config(\"hive.metastore.uris\", \"thrift://metastore:9083\") \\\n",
+        "            .config(\"spark.sql.extensions\", \"io.delta.sql.DeltaSparkSessionExtension\") \\\n",
+        "            .config(\"spark.sql.catalog.spark_catalog\", \"org.apache.spark.sql.delta.catalog.DeltaCatalog\") \\\n",
+        "            .getOrCreate()\n",
+        "    return spark\n",
+        "\n",
+        "def ingest_data():\n",
+        "    \"\"\"Ingest data from AdventureWorks to HDFS.\"\"\"\n",
+        "\n",
+        "    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')\n",
+        "\n",
+        "    logging.info(\"Starting Processing......\")\n",
+        "    \n",
+        "    spark = configure_spark()\n",
+        "    input_name = configs.prefix_layer_name['1']  # bronze layer\n",
+        "    hdfs_input = configs.lake_path['bronze']\n",
+        "    \n",
+        "    output_name = configs.prefix_layer_name['2']  # silver layer\n",
+        "    hdfs_output = configs.lake_path['silver']\n",
+        "\n",
+        "    for table_name, query in configs.tables_queries_silver.items():        \n",
+        "        try:\n",
+        "            df_source = spark.read.format(\"delta\").load(f'{hdfs_input}{input_name}{table_name}')\n",
+        "\n",
+        "            df_delta = spark.read.format(\"delta\").load(f'{hdfs_output}{output_name}{table_name}')\n",
+        "\n",
+        "            max_modified_date_delta = df_delta.selectExpr(\"max(modifieddate)\").collect()[0][0]\n",
+        "\n",
+        "            df_new_data = df_source.filter(df_source[\"modifieddate\"] > max_modified_date_delta)\n",
+        "            \n",
+        "            df_with_update_date = df_new_data.withColumn(\"last_update\", lit(datetime.now()))\n",
+        "\n",
+        "            df_with_update_date.write.format(\"delta\").mode(\"append\").partitionBy('month_key').save(f'{hdfs_output}{output_name}{table_name}')\n",
+        "\n",
+        "            num_rows_written = df_with_update_date.count()\n",
+        "            logging.info(f\"Table {table_name} successfully processed and saved to Delta Lake: {hdfs_output}{output_name}{table_name}. {num_rows_written} rows written.\")\n",
+        "\n",
+        "        except Exception as e:\n",
+        "            logging.error(f\"Error processing table {table_name}: {str(e)}\")\n",
+        "\n",
+        "    logging.info(\"Processing completed!\")\n",
+        "\n",
+        "if __name__ == \"__main__\":\n",
+        "    ingest_data()\n"
+       ]
+      }
+     ],
+     "metadata": {
+      "kernelspec": {
+       "display_name": "Python 3 (ipykernel)",
+       "language": "python",
+       "name": "python3"
+      },
+      "language_info": {
+       "codemirror_mode": {
+        "name": "ipython",
+        "version": 3
+       },
+       "file_extension": ".py",
+       "mimetype": "text/x-python",
+       "name": "python",
+       "nbconvert_exporter": "python",
+       "pygments_lexer": "ipython3",
+       "version": "3.10.8"
+      }
+     },
+     "nbformat": 4,
+     "nbformat_minor": 5
+    }
+  nb_115_update_gold.ipynb: |
+    {
+     "cells": [
+      {
+       "cell_type": "code",
+       "execution_count": 1,
+       "id": "1974b0cc-af8e-4cdf-a3c1-42fb29f94d85",
+       "metadata": {},
+       "outputs": [],
+       "source": [
+        "import pyspark\n",
+        "from pyspark.sql import SparkSession\n",
+        "import logging\n",
+        "from datetime import datetime \n",
+        "from pyspark.sql.functions import lit \n",
+        "\n",
+        "from configs import configs\n",
+        "from functions import functions as F"
+       ]
+      },
+      {
+       "cell_type": "code",
+       "execution_count": 2,
+       "id": "51e1e8f7-4707-497f-bdee-decb444ba7f1",
+       "metadata": {},
+       "outputs": [
+        {
+         "name": "stderr",
+         "output_type": "stream",
+         "text": [
+          "2024-07-02 11:05:50,584 - INFO - Starting Refinement...\n",
+          "2024-07-02 11:06:02,804 - INFO - Table humanresources_department successfully processed and saved to Delta Lake: s3a://gold/adventure_works/gold_humanresources_department. 0 rows written.\n",
+          "2024-07-02 11:06:04,852 - INFO - Table humanresources_groupname_qtd successfully processed and saved to Delta Lake: s3a://gold/adventure_works/gold_humanresources_groupname_qtd. 0 rows written.\n",
+          "2024-07-02 11:06:04,853 - INFO - Refinement completed!\n"
+         ]
+        }
+       ],
+       "source": [
+        "def configure_spark():\n",
+        "    \"\"\"Configure SparkSession.\"\"\"\n",
+        "    spark = SparkSession.builder \\\n",
+        "            .appName(\"Refinement Incremental Silver to Gold AdventureWorks\") \\\n",
+        "            .config(\"spark.hadoop.fs.s3a.endpoint\", \"http://minio:9000\") \\\n",
+        "            .config(\"spark.hadoop.fs.s3a.access.key\", \"chapolin\") \\\n",
+        "            .config(\"spark.hadoop.fs.s3a.secret.key\", \"mudar@123\") \\\n",
+        "            .config(\"spark.hadoop.fs.s3a.path.style.access\", True) \\\n",
+        "            .config(\"spark.hadoop.fs.s3a.impl\", \"org.apache.hadoop.fs.s3a.S3AFileSystem\") \\\n",
+        "            .config(\"spark.hadoop.fs.s3a.aws.credentials.provider\", \"org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider\") \\\n",
+        "            .config(\"hive.metastore.uris\", \"thrift://metastore:9083\") \\\n",
+        "            .config(\"spark.sql.extensions\", \"io.delta.sql.DeltaSparkSessionExtension\") \\\n",
+        "            .config(\"spark.sql.catalog.spark_catalog\", \"org.apache.spark.sql.delta.catalog.DeltaCatalog\") \\\n",
+        "            .getOrCreate()\n",
+        "    return spark\n",
+        "\n",
+        "def ingest_data():\n",
+        "    \"\"\"Ingest data from AdventureWorks to HDFS.\"\"\"\n",
+        "\n",
+        "    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')\n",
+        "\n",
+        "    logging.info(\"Starting Refinement...\")\n",
+        "    \n",
+        "    spark = configure_spark()\n",
+        "    input_name = configs.prefix_layer_name['2']  # bronze layer\n",
+        "    hdfs_input = configs.lake_path['silver']\n",
+        "    \n",
+        "    output_name = configs.prefix_layer_name['3']  # silver layer\n",
+        "    hdfs_output = configs.lake_path['gold']\n",
+        "\n",
+        "    for table_name, query in configs.tables_gold.items():        \n",
+        "        try:\n",
+        "            \n",
+        "            query = F.get_query(table_name, hdfs_input, input_name, configs.tables_gold)\n",
+        "            \n",
+        "            df_input = spark.sql(query)\n",
+        "            \n",
+        "            df_output = spark.read.format(\"delta\").load(f'{hdfs_output}{output_name}{table_name}')\n",
+        "\n",
+        "            max_modified_date_delta = df_output.selectExpr(\"max(modifieddate)\").collect()[0][0]\n",
+        "\n",
+        "            df_new_data = df_input.filter(df_input[\"modifieddate\"] > max_modified_date_delta)\n",
+        "            \n",
+        "            df_with_update_date = df_new_data.withColumn(\"last_update\", lit(datetime.now()))\n",
+        "\n",
+        "            df_with_update_date.write.format(\"delta\").mode(\"append\").partitionBy('month_key').save(f'{hdfs_output}{output_name}{table_name}')\n",
+        "\n",
+        "            num_rows_written = df_with_update_date.count()\n",
+        "            logging.info(f\"Table {table_name} successfully processed and saved to Delta Lake: {hdfs_output}{output_name}{table_name}. {num_rows_written} rows written.\")\n",
+        "\n",
+        "        except Exception as e:\n",
+        "            logging.error(f\"Error processing table {table_name}: {str(e)}\")\n",
+        "\n",
+        "    logging.info(\"Refinement completed!\")\n",
+        "\n",
+        "if __name__ == \"__main__\":\n",
+        "    ingest_data()\n"
+       ]
+      }
+     ],
+     "metadata": {
+      "kernelspec": {
+       "display_name": "Python 3 (ipykernel)",
+       "language": "python",
+       "name": "python3"
+      },
+      "language_info": {
+       "codemirror_mode": {
+        "name": "ipython",
+        "version": 3
+       },
+       "file_extension": ".py",
+       "mimetype": "text/x-python",
+       "name": "python",
+       "nbconvert_exporter": "python",
+       "pygments_lexer": "ipython3",
+       "version": "3.10.8"
+      }
+     },
+     "nbformat": 4,
+     "nbformat_minor": 5
+    }
+kind: ConfigMap
+metadata:
+  labels:
+    io.kompose.service: spark-master
+  name: spark-master-cm2

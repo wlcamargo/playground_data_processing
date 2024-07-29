@@ -1,0 +1,14 @@
+apiVersion: v1
+data:
+  postgres.properties: |-
+    connector.name=postgresql
+    connection-url=jdbc:postgresql://172.19.232.161:5435/Adventureworks
+    connection-user=postgres
+    connection-password=postgres
+kind: ConfigMap
+metadata:
+  annotations:
+    use-subpath: "true"
+  labels:
+    io.kompose.service: trino
+  name: trino-cm3

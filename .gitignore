@@ -1,0 +1,7 @@
+venv/
+__pycache__
+*.ipynb_checkpoints/
+.log
+src/dbt/logs/*
+src/dbt/.user.yml
+src/dbt/lakehouse/package-lock.yml

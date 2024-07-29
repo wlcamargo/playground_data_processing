@@ -1,0 +1,15 @@
+apiVersion: v1
+data:
+  sqlserver.properties: |-
+    connector.name=sqlserver
+    connection-url=
+    connection-url=jdbc:sqlserver://172.19.232.161:1435;databaseName=youtube;encrypt=false
+    connection-user=sa
+    connection-password=mudar@123
+kind: ConfigMap
+metadata:
+  annotations:
+    use-subpath: "true"
+  labels:
+    io.kompose.service: trino
+  name: trino-cm4

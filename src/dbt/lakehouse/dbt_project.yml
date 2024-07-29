@@ -1,0 +1,28 @@
+# dbt_project.yml
+
+name: 'lakehouse'
+version: '1.0.0'
+config-version: 2
+
+profile: 'lakehouse'
+
+model-paths: ["models"]
+analysis-paths: ["analyses"]
+test-paths: ["tests"]
+seed-paths: ["seeds"]
+macro-paths: ["macros"]
+snapshot-paths: ["snapshots"]
+
+target-path: "target"
+clean-targets:
+  - "target"
+  - "dbt_packages"
+
+vars:
+  catalog: delta
+  schema: bronze
+
+models:
+  lakehouse:
+    +materialized: table
+    +on_table_exists: drop
